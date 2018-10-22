@@ -1220,6 +1220,136 @@ void testTopologicalIndex() {
   }
 }
 
+// Fixture to set up a graph and make assertions clearer
+struct TestRelocationFixture {
+  TestRelocationFixture() {
+    createGraph();
+  }
+
+  // Nodes are named after their output.
+  // e.g. "a" is an alias for "the node that outputs the value `a`"
+  void createGraph() {
+    createNode("a", {});
+    createNode("b", {"a"});
+    createNode("c", {});
+    createNode("d", {"a", "b"});
+    createNode("e", {"c", "b"});
+    createNode("f", {"e"});
+    createNode("g", {"e"});
+    createNode("h", {"g"});
+    createNode("i", {"g"});
+    createNode("j", {"i"});
+    createNode("k", {"i"});
+    createNode("l", {"a"});
+    createNode("m", {}, {"l"}); // block depends on l
+    createNode("n", {"m"});
+
+    graph.lint();
+  }
+
+  void createNode(
+      const std::string& name,
+      const std::vector<std::string>& inputNames,
+      const std::vector<std::string>& blockInputNames = {}) {
+    std::vector<Value*> inputs;
+    for (const auto name : inputNames) {
+      inputs.push_back(nodes.at(name)->output());
+    }
+    auto node = graph.appendNode(graph.create(prim::Undefined, inputs));
+    node->output()->setUniqueName(name);
+    nodes[name] = node;
+
+    if (blockInputNames.size() != 0) {
+      node->addBlock();
+      std::vector<Value*> blockDeps;
+      for (const auto name : blockInputNames) {
+        blockDeps.push_back(nodes.at(name)->output());
+      }
+
+      auto block = node->blocks().at(0);
+      block->appendNode(graph.create(prim::Undefined, blockDeps));
+    }
+  }
+
+  bool moveAfterTopologicallyValid(
+      const std::string& toInsert,
+      const std::string& insertPoint) {
+    const auto couldMove =
+        nodes.at(toInsert)->moveAfterTopologicallyValid(nodes.at(insertPoint));
+    graph.lint();
+    return couldMove;
+  }
+
+  void checkPostCondition(
+      const std::string& toInsert,
+      const std::string& insertPoint) {
+    for (auto iter = graph.block()->nodes().begin();
+         iter != graph.block()->nodes().end();
+         ++iter) {
+      if (*iter == nodes.at(insertPoint)) {
+        ++iter;
+        JIT_ASSERT(*iter == nodes.at(toInsert));
+        return;
+      }
+    }
+    // should not reach here
+    JIT_ASSERT(false);
+  }
+
+  Graph graph;
+  std::unordered_map<std::string, Node*> nodes;
+};
+
+void testRelocation() {
+  {
+    // Simple move backward
+    TestRelocationFixture fixture;
+    JIT_ASSERT(fixture.moveAfterTopologicallyValid("c", "a"));
+    fixture.checkPostCondition("c", "a");
+  }
+  {
+    // simple invalid move backward
+    TestRelocationFixture fixture;
+    JIT_ASSERT(!fixture.moveAfterTopologicallyValid("d", "a"));
+  }
+  {
+    // doesn't actually move anything
+    TestRelocationFixture fixture;
+    JIT_ASSERT(fixture.moveAfterTopologicallyValid("f", "e"));
+    fixture.checkPostCondition("f", "e");
+  }
+  {
+    // move backward with multiple dependencies
+    TestRelocationFixture fixture;
+    JIT_ASSERT(fixture.moveAfterTopologicallyValid("e", "c"));
+    fixture.checkPostCondition("e", "c");
+  }
+  {
+    // Move backward with non-zero working set
+    TestRelocationFixture fixture;
+    JIT_ASSERT(fixture.moveAfterTopologicallyValid("k", "f"));
+    fixture.checkPostCondition("k", "f");
+  }
+  {
+    // Simple move forward
+    TestRelocationFixture fixture;
+    JIT_ASSERT(fixture.moveAfterTopologicallyValid("c", "d"));
+    fixture.checkPostCondition("c", "d");
+  }
+  {
+    // Move forward with non-zero working set
+    TestRelocationFixture fixture;
+    JIT_ASSERT(fixture.moveAfterTopologicallyValid("f", "l"));
+    fixture.checkPostCondition("f", "l");
+  }
+  {
+    // Move forward over block dependency
+    TestRelocationFixture fixture;
+    JIT_ASSERT(!fixture.moveAfterTopologicallyValid("l", "m"));
+    // Move backward over block dependency
+    JIT_ASSERT(!fixture.moveAfterTopologicallyValid("n", "l"));
+  }
+}
 } // namespace
 } // namespace jit
 } // namespace torch

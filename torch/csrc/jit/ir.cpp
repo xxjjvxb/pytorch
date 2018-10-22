@@ -894,6 +894,137 @@ Node* Node::insertAfter(Node * n) {
   return this;
 }
 
+bool Node::moveAfterTopologicallyValid(Node* n) {
+  JIT_ASSERT(this->inBlockList() && n->inBlockList());
+  JIT_ASSERT(this->owningBlock() == n->owningBlock());
+  JIT_ASSERT(this != n);
+
+  if (this->isAfter(n)) {
+    return tryMoveBackward(n);
+  } else {
+    return tryMoveForward(n);
+  }
+}
+
+// The basic approach is: have a "working set" that we are moving forward, one
+// node at a time. When we can't move past a node (because it depends on the
+// working set), then add it to the working set and keep moving until we hit
+// `moveAfter`.
+bool Node::tryMoveForward(Node* moveAfter) {
+    JIT_ASSERT(this->isBefore(moveAfter));
+
+    std::list<Node*> workingSet;
+    workingSet.push_back(this);
+    auto curNode = this->next();
+
+    // Move forward one node at a time
+    while (curNode != moveAfter) {
+      if (curNode->isDependentOn(workingSet)) {
+        // If we can't move past this node, add it to the working set
+        workingSet.push_back(curNode);
+      }
+      curNode = curNode->next();
+    }
+
+    // Check if we can move the working set past moveAfter
+    if (moveAfter->isDependentOn(workingSet)) {
+      // if we can't, then there are intermediate dependencies between the
+      // `this` and `moveAfter`, so we can't do the move
+      return false;
+    }
+
+    // Execute the move, appending the whole working set to moveAfter
+    JIT_ASSERT(curNode == moveAfter);
+    for (auto toMove : workingSet) {
+      toMove->moveAfter(curNode);
+      curNode = toMove;
+    }
+    return true;
+}
+
+bool Node::tryMoveBackward(Node* moveAfter) {
+    JIT_ASSERT(this->isAfter(moveAfter));
+
+    std::list<Node*> workingSet;
+    workingSet.push_back(this);
+
+    // Move backward one node at a time
+    auto curNode = this->prev();
+    while (curNode != moveAfter) {
+      // If we can't move past this node, add it to the working set
+      if (curNode->isDependencyFor(workingSet)) {
+        workingSet.push_back(curNode);
+      }
+      curNode = curNode->prev();
+    }
+
+    // Check if we can move the working set EXCEPT for `this` behind `moveAfter`
+    // We want to end up like this:
+    //   <working set>
+    //   `moveAfter`
+    //   `this`
+    // So we need to exclude `this` from the dependency check.
+    workingSet.pop_front(); // removing `this` from the working set
+    if (moveAfter->isDependencyFor(workingSet)) {
+      return false;
+    }
+
+    // Execute the move:
+    JIT_ASSERT(curNode == moveAfter);
+    // ...append `this` to `moveAfter`
+    this->moveAfter(moveAfter);
+
+    // ...then prepend the rest of the working set
+    for (auto node : workingSet) {
+      node->moveBefore(curNode);
+      curNode = node;
+    }
+    return true;
+}
+
+template <typename T>
+bool Node::isDependencyFor(const T& nodes) const {
+  return std::any_of(nodes.begin(), nodes.end(), [&](const Node* node) {
+    return std::any_of(
+               node->inputs().cbegin(),
+               node->inputs().cend(),
+               [&](const Value* input) { return input->node() == this; }) ||
+        // Check inner blocks for any uses
+        std::any_of(
+               node->blocks().cbegin(),
+               node->blocks().cend(),
+               [&](const Block* block) {
+                 return isDependencyFor(block->nodes());
+               });
+  });
+}
+
+static void buildInputSet(
+    const Node* node,
+    std::unordered_set<const Value*>& inputs) {
+  for (const auto input : node->inputs()) {
+    inputs.insert(input);
+  }
+
+  for (const auto block : node->blocks()) {
+    for (const auto node : block->nodes()) {
+      buildInputSet(node, inputs);
+    }
+  }
+}
+
+bool Node::isDependentOn(const std::list<Node*>& nodes) const {
+  std::unordered_set<const Value*> inputs;
+  buildInputSet(this, inputs);
+
+  return std::any_of(nodes.cbegin(), nodes.cend(), [&](const Node* node) {
+    return std::any_of(
+        node->outputs().cbegin(),
+        node->outputs().cend(),
+        [&](const Value* output) { return inputs.count(output) != 0; });
+  });
+}
+
 void Node::moveAfter(Node * n) {
   removeFromList();
   insertAfter(n);

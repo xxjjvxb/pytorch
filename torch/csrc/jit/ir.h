@@ -503,6 +503,9 @@ public:
 
   // Move 'this' (already in the graph) after 'n' in the topological order.
   //
+  // NOTE: Does not check that data dependencies are preserved, see
+  //   moveAfterTopologicallyValid
+  //
   // Given: %2 = f(%1)
   //        %3 = g(%1)
   // Execute: %2.moveAfter(%3)
@@ -511,7 +514,18 @@ public:
   //
   TORCH_API void moveAfter(Node * n);
 
+  // Move 'this' (already in the graph) after 'n' in the topological order.
+  //
+  // Tries to preserve data dependencies, so other nodes might be moved.
+  //
+  // Returns `false` if it's impossible to move `this` after `n` without
+  // violating dependencies, otherwise executes the move and returns `true`
+  TORCH_API bool moveAfterTopologicallyValid(Node * n);
+
   // Move a node 'n' (already in the graph) before 'this' in the topological order.
+  //
+  // NOTE: Does not check that data dependencies are preserved, see
+  //   moveAfterTopologicallyValid
   //
   // Given: %2 = f(%1)
   //        %3 = g(%1)
@@ -596,6 +610,15 @@ public:
 
   virtual ~Node() = default;
 private:
+  // Try to move `this` forward/backward while preserving data dependencies
+  bool tryMoveForward(Node* moveAfter);
+  bool tryMoveBackward(Node* moveAfter);
+  // Do any of `nodes` use an output from `this`?
+  template<typename T>
+  bool isDependencyFor(const T& nodes) const;
+  // Does `this` use any outputs of `nodes`?
+  bool isDependentOn(const std::list<Node*>& nodes) const;
+
   std::pair<Value*, const Argument&> findInput(Symbol name);
   void findSchema() const;
   // Lookup iterator in use list of _input i_ that corresponds to its use of _this_
